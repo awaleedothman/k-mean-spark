@@ -17,7 +17,7 @@ def main():
             points.append([x, y])
 
     rmtree("output")
-    stream = popen('spark-submit --master local[*] --class KMean k-mean.jar')
+    stream = popen('spark-submit --master local --class KMean k-mean.jar')
     output = stream.read()
     print(output)
 
@@ -33,7 +33,7 @@ def main():
 
     with open("output/centroids.txt", "r") as f:
         for line in f.readlines():
-            tokens = line.lstrip("(").rstrip(")").split(",")
+            tokens = line.lstrip("([").rstrip("])").split(",")
             point = (float(tokens[1]), float(tokens[2]))
             centroids.append(point)
             colors[point] = random_color()

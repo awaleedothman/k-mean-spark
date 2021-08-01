@@ -1,15 +1,19 @@
 import model.Point;
-import org.apache.spark.SparkConf;
-import org.apache.spark.api.java.JavaPairRDD;
-import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
-import scala.Tuple2;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SQLContext;
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.api.java.UDF2;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.api.java.function.ForeachFunction;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Map;
 import java.util.Random;
+
+import static org.apache.spark.sql.functions.*;
 
 public class KMean {
 
@@ -56,35 +60,34 @@ public class KMean {
         return nearest.getId();
     }
 
-    private static Point addPoints(Point p1, Point p2) {
-        Point point = new Point(p1.getX() + p2.getX(), p1.getY() + p2.getY());
-        point.setCount(p1.getCount() + p2.getCount());
-        return point;
-    }
-
     public static void main(String[] args) {
-        SparkConf conf = new SparkConf().setAppName("k-mean");
-        JavaSparkContext sc = new JavaSparkContext(conf);
+        SparkSession spark = SparkSession
+                .builder()
+                .appName("k-mean")
+                .getOrCreate();
+        SQLContext sqlContext = new SQLContext(spark.sparkContext());
+        JavaSparkContext jsc = JavaSparkContext.fromSparkContext(spark.sparkContext());
 
         ArrayList<Point> centroids = initCentroids(initBoundaries());
-        final JavaRDD<Point> input = sc.textFile("input").map(Point::new);
-        JavaPairRDD<Integer, Point> rdd = null;
-        final Broadcast<ArrayList<Point>> broadCast_Centroids = sc.broadcast(centroids);
+        Broadcast<ArrayList<Point>> broadcastCentroids = jsc.broadcast(centroids);
+
+        sqlContext.udf().register("assignCentroid",
+                (UDF2<Double, Double, Integer>) (x, y) -> assignCentroid(new Point(x, y), broadcastCentroids.getValue()),
+                DataTypes.IntegerType);
+
+        Dataset<Row> input = spark.read().option("header", "true").option("inferSchema", "true").csv("input"),
+                df = null;
+
         for (int i = 0; i < MAX_ITER; i++) {
-            rdd = input
-                    .mapToPair(p -> new Tuple2<>(assignCentroid(p, broadCast_Centroids.getValue()), p))
-                    .reduceByKey(KMean::addPoints)
-                    .mapValues(Point::normalize);
-
-            Map<Integer, Point> map = rdd.collectAsMap();
-            for (int id : map.keySet()) {
-                Point p = map.get(id);
-                p.setId(id);
-                centroids.set(id, p);
-            }
+            df = input.withColumn("centroid", callUDF("assignCentroid", col("x"), col("y")))
+                    .groupBy("centroid").avg("x", "y");
+            df.foreach((ForeachFunction<Row>) row -> {
+                Point p = new Point(row.getAs("avg(x)"), row.getAs("avg(y)"));
+                p.setId(row.getAs("centroid"));
+                broadcastCentroids.getValue().set(row.getAs("centroid"), p);
+            });
         }
-
-        rdd.saveAsTextFile("output");
+        df.toJavaRDD().saveAsTextFile("output");
 
     }
 }
